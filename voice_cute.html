@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cute 보이스 변환기</title>
+<style>
+:root{--bg:#15171e;--pn:#1f222c;--ln:#343949;--tx:#ece9f4;--mu:#a3a8bc;--ac:#f2a7c9}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:16px/1.6 Pretendard,system-ui,"Malgun Gothic",sans-serif;display:flex;justify-content:center;padding:24px 16px}
+main{width:100%;max-width:580px}
+h1{font-size:23px;margin:0 0 4px}
+.s{color:var(--mu);margin:0 0 18px;font-size:14px}
+.card{background:var(--pn);border:1px solid var(--ln);border-radius:12px;padding:16px;margin-bottom:14px}
+label{display:block;font-size:14px;color:var(--mu);margin:12px 0 4px}
+label:first-child{margin-top:0}
+label.row{display:flex;justify-content:space-between;font-size:15px;margin-top:14px}
+.row b{color:var(--ac);font-variant-numeric:tabular-nums}
+select,button{font:inherit;color:var(--tx);background:#272b38;border:1px solid var(--ln);border-radius:8px;padding:8px 10px}
+select{width:100%}
+button{cursor:pointer}
+:focus-visible{outline:2px solid var(--ac);outline-offset:2px}
+.go{width:100%;padding:14px;font-size:18px;font-weight:700;background:var(--ac);color:#2a1424;border:0;margin-bottom:14px}
+.go.on{background:#3a3f4f;color:var(--tx)}
+input[type=range]{width:100%;accent-color:var(--ac)}
+#hz{font-size:30px;font-weight:700;text-align:center;color:var(--ac);font-variant-numeric:tabular-nums;margin:2px 0 6px}
+.mt{height:8px;background:#272b38;border-radius:4px;overflow:hidden;margin-top:6px}
+#m{height:100%;width:0;background:var(--ac)}
+small{color:var(--mu);display:block;margin-top:10px;font-size:13px;line-height:1.5}
+</style></head><body><main>
+<h1>Cute 보이스 변환기</h1>
+<p class="s">마이크 소리를 브라우저 안에서 바로 변환해요. 소리는 어디로도 전송되지 않아요.</p>
+<div class="card">
+<label for="in">마이크</label><select id="in"></select>
+<label for="out">출력 장치</label><select id="out"></select>
+<small>디스코드나 게임에서 쓰려면 VB-CABLE 같은 가상 케이블을 설치하고, 여기서 CABLE Input을 고른 뒤 상대 프로그램의 마이크를 CABLE Output으로 지정하세요.</small>
+<label for="q">모드</label><select id="q"><option value="2048">고음질 (지연 약 50ms)</option><option value="1024">저지연 (지연 약 25ms)</option></select>
+</div>
+<button class="go" id="go">시작</button>
+<div class="card">
+<div id="hz">- Hz</div>
+<div class="mt"><div id="m"></div></div>
+<small id="st">시작을 누르고 마이크 권한을 허용하세요. 스피커로 들으면 하울링이 생기니 이어폰을 쓰세요.</small>
+<small>숫자는 내 음높이와 변환된 음높이예요. 억양 폭을 올리면 말할 때 올라가고 내려가는 폭이 커져서 통통 튀는 말투가 돼요.</small>
+<div id="sl"></div>
+</div>
+</main>
+<script type="text/plain" id="wk">
+class VC extends AudioWorkletProcessor{
+constructor(o){
+super();
+const N=o.processorOptions.n,H=N/4,M=N/2;
+this.N=N;this.H=H;this.p=1.78;this.f=1.28;this.h=1.35;this.b=0.14;this.s=0.55;this.e=1.7;this.g=1;
+this.lm=0;this.init=false;this.mv=1;this.fc=0;
+this.inF=new Float32Array(N);this.outF=new Float32Array(H);this.acc=new Float32Array(2*N);
+this.lat=N-H;this.rv=this.lat;
+this.win=new Float32Array(N);for(let i=0;i<N;i++)this.win[i]=0.5-0.5*Math.cos(2*Math.PI*i/N);
+this.cs=new Float32Array(M);this.sn=new Float32Array(M);
+for(let i=0;i<M;i++){this.cs[i]=Math.cos(2*Math.PI*i/N);this.sn[i]=Math.sin(2*Math.PI*i/N)}
+this.rev=new Uint32Array(N);const bt=Math.log2(N);
+for(let i=0;i<N;i++){let r=0;for(let k=0;k<bt;k++)if(i&(1<<k))r|=1<<(bt-1-k);this.rev[i]=r}
+this.re=new Float32Array(N);this.im=new Float32Array(N);
+for(const k of['mag','last','tf','env','nm','nf','sp'])this[k]=new Float32Array(M+1);
+this.L=Math.round(sampleRate/300);
+this.port.onmessage=e=>Object.assign(this,e.data);
+}
+fft(re,im,inv){
+const N=this.N,rev=this.rev,s=inv?1:-1;
+for(let i=0;i<N;i++){const j=rev[i];if(j>i){let t=re[i];re[i]=re[j];re[j]=t;t=im[i];im[i]=im[j];im[j]=t}}
+for(let len=2;len<=N;len<<=1){
+const hl=len>>1,st=N/len;
+for(let i=0;i<N;i+=len)for(let k=0,t=0;k<hl;k++,t+=st){
+const wr=this.cs[t],wi=s*this.sn[t],a=i+k,c=a+hl;
+const xr=re[c]*wr-im[c]*wi,xi=re[c]*wi+im[c]*wr;
+re[c]=re[a]-xr;im[c]=im[a]-xi;re[a]+=xr;im[a]+=xi;
+}}}
+frame(){
+const N=this.N,H=this.H,M=N/2,re=this.re,im=this.im,mag=this.mag,last=this.last,tf=this.tf,env=this.env,nm=this.nm,nf=this.nf,sp=this.sp,win=this.win,L=this.L,p=this.p,f=this.f,h=this.h,b=this.b;
+const T=2*Math.PI,ex=T*H/N,os=N/H,bw=sampleRate/N;
+for(let i=0;i<N;i++){re[i]=this.inF[i]*win[i];im[i]=0}
+this.fft(re,im,false);
+let tot=1e-9,hf=0;const k4=Math.floor(4500/bw);
+for(let k=0;k<=M;k++){
+const r=re[k],q=im[k],mg=Math.sqrt(r*r+q*q);mag[k]=mg;
+tot+=mg*mg;if(k>=k4)hf+=mg*mg;
+const ph=Math.atan2(q,r);let d=ph-last[k]-k*ex;last[k]=ph;
+d-=T*Math.round(d/T);tf[k]=k+os*d/T;
+}
+const sib=this.s*Math.min(1,Math.max(0,(hf/tot-0.2)/0.4));
+for(let k=0;k<=M;k++)re[k]=Math.log(mag[k]+1e-5);
+for(let k=M+1;k<N;k++)re[k]=re[N-k];
+im.fill(0);this.fft(re,im,true);
+const q0=Math.floor(sampleRate/500),q1=Math.min(M-2,Math.floor(sampleRate/70));
+let bv=-1,bq=q0,mt=1,vo=0,f0=0;
+for(let n=q0;n<=q1;n++)if(re[n]>bv){bv=re[n];bq=n}
+if(bv/N>0.07){
+for(let n=q0+1;n<bq;n++)if(re[n]>=0.8*bv&&re[n]>=re[n-1]&&re[n]>=re[n+1]){bq=n;break}
+f0=sampleRate/bq;const lf=Math.log(f0);
+if(!this.init){this.lm=lf;this.init=true}else this.lm+=0.006*(lf-this.lm);
+mt=Math.min(1.4,Math.max(0.8,Math.exp((this.e-1)*(lf-this.lm))));vo=1;
+}
+this.mv+=0.4*(mt-this.mv);
+const pr=p*this.mv;
+if(++this.fc%4===0)this.port.postMessage(vo?[f0,f0*pr]:[0,0]);
+for(let n=0;n<N;n++){
+const q=n<=M?n:N-n;let w=0;
+if(q<L)w=q<0.75*L?1:0.5+0.5*Math.cos(Math.PI*(q-0.75*L)/(0.25*L));
+re[n]=re[n]*w/N;im[n]=0;
+}
+this.fft(re,im,false);
+for(let k=0;k<=M;k++)env[k]=re[k];
+nm.fill(0);nf.fill(0);
+for(let k=0;k<=M;k++){const j=Math.round(k*pr);if(j<=M){nm[j]+=mag[k]*Math.exp(-env[k]);nf[j]=tf[k]*pr}}
+for(let j=0;j<=M;j++){
+const fr=j*bw,t=Math.min(1,Math.max(0,(fr-500)/2500)),x=j/(f+(h-f)*t),i0=Math.floor(x);
+let e;if(i0>=M)e=env[M];else{const q=x-i0;e=env[i0]*(1-q)+env[i0+1]*q}
+const E=Math.exp(e)*(fr>3500?1+sib:1),m=nm[j]*E;
+const z=fr>80?b*E*(0.15+0.85*Math.min(1,Math.max(0,(fr-1000)/3000))):0,a=Math.random()*T;
+sp[j]=(sp[j]+T*(nf[j]-j)/os+j*ex)%T;
+re[j]=m*Math.cos(sp[j])+z*Math.cos(a);im[j]=m*Math.sin(sp[j])+z*Math.sin(a);
+}
+for(let j=1;j<M;j++){re[N-j]=re[j];im[N-j]=-im[j]}
+im[0]=0;im[M]=0;
+this.fft(re,im,true);
+const sc=1/(1.5*N);
+for(let i=0;i<N;i++)this.acc[i]+=win[i]*re[i]*sc;
+for(let k=0;k<H;k++)this.outF[k]=this.acc[k];
+this.acc.copyWithin(0,H,H+N);
+this.inF.copyWithin(0,H,N);
+}
+process(ins,outs){
+const x=ins[0][0],o=outs[0],n=o[0].length;
+for(let i=0;i<n;i++){
+this.inF[this.rv]=x?x[i]:0;
+let y=this.outF[this.rv-this.lat];
+this.rv++;
+if(this.rv>=this.N){this.rv=this.lat;this.frame()}
+y=Math.tanh(y*this.g);
+for(let c=0;c<o.length;c++)o[c][i]=y;
+}
+return true;
+}}
+registerProcessor('vc',VC);
+</script>
+<script>
+const $=id=>document.getElementById(id),st=t=>$('st').textContent=t;
+const SL=[['a','귀여움 강도',0,130,1,'%',100],['p','음높이',0,16,0.5,' 반음',10],['e','억양 폭',100,250,5,'%',170],['f','목 크기 (작게)',100,170,1,'%',128],['b','숨소리',0,60,1,'%',14],['s','선명한 s',0,100,1,'%',55],['br','밝기',-4,8,0.5,' dB',4],['g','볼륨',0,250,1,'%',100]];
+const sl={};let ctx,node,stream,an,fl,N=2048;
+SL.forEach(([k,n,a,z,s,u,d])=>{$('sl').insertAdjacentHTML('beforeend','<label class="row" for="'+k+'"><span>'+n+'</span><b id="v'+k+'"></b></label><input type="range" id="'+k+'" min="'+a+'" max="'+z+'" step="'+s+'" value="'+d+'">');sl[k]=$(k);sl[k].oninput=upd});
+function upd(){
+SL.forEach(([k,n,a,z,s,u])=>{$('v'+k).textContent=(k==='p'||k==='br'?(+sl[k].value>0?'+':''):'')+sl[k].value+u});
+const V=k=>+sl[k].value,a=V('a')/100,fo=V('f')/100-1;
+if(fl){fl[0].frequency.value=70+120*a;fl[1].gain.value=-4*a;fl[2].gain.value=3*a;fl[3].gain.value=a*V('br')}
+if(node)node.port.postMessage({p:2**(a*V('p')/12),f:1+fo*a,h:1+fo*1.25*a,b:V('b')/100*a,s:V('s')/100*a,e:1+(V('e')/100-1)*a,g:V('g')/100});
+}
+function fill(s,l,d){const v=s.value;s.innerHTML='';l.forEach((x,i)=>s.add(new Option(x.label||d+' '+(i+1),x.deviceId)));if([...s.options].some(o=>o.value===v))s.value=v}
+async function devs(){const d=await navigator.mediaDevices.enumerateDevices();fill($('in'),d.filter(x=>x.kind==='audioinput'),'마이크');fill($('out'),d.filter(x=>x.kind==='audiooutput'),'출력')}
+function stop(){
+if(stream)stream.getTracks().forEach(t=>t.stop());
+if(ctx)ctx.close();
+stream=ctx=node=an=fl=null;
+$('go').textContent='시작';$('go').classList.remove('on');$('q').disabled=false;$('m').style.width='0';$('hz').textContent='- Hz';
+}
+async function start(){
+try{
+stream=await navigator.mediaDevices.getUserMedia({audio:{deviceId:$('in').value?{exact:$('in').value}:undefined,echoCancellation:false,noiseSuppression:true,autoGainControl:false}});
+await devs();
+N=+$('q').value;
+ctx=new AudioContext({latencyHint:'interactive'});
+const url=URL.createObjectURL(new Blob([$('wk').textContent],{type:'text/javascript'}));
+await ctx.audioWorklet.addModule(url);
+node=new AudioWorkletNode(ctx,'vc',{outputChannelCount:[2],processorOptions:{n:N}});
+node.port.onmessage=e=>{const[a,b]=e.data;$('hz').textContent=a?Math.round(a)+' Hz → '+Math.round(b)+' Hz':'쉬는 중'};
+const mk=(t,f,q)=>{const x=ctx.createBiquadFilter();x.type=t;x.frequency.value=f;if(q)x.Q.value=q;return x};
+fl=[mk('highpass',100,0.7),mk('lowshelf',450),mk('peaking',3300,0.9),mk('highshelf',7000)];
+an=ctx.createAnalyser();
+const src=ctx.createMediaStreamSource(stream);
+if($('out').value&&ctx.setSinkId)await ctx.setSinkId($('out').value).catch(()=>{});
+src.connect(node);let c=node;fl.forEach(x=>{c.connect(x);c=x});c.connect(ctx.destination);c.connect(an);
+await ctx.resume();upd();
+$('go').textContent='중지';$('go').classList.add('on');$('q').disabled=true;
+st('변환 중 · 예상 지연 약 '+Math.round(N/ctx.sampleRate*1000+(ctx.baseLatency+(ctx.outputLatency||0))*1000)+'ms · 스피커로 들으면 하울링이 생기니 이어폰을 쓰세요.');
+}catch(e){stop();st('시작하지 못했어요: '+e.message+' 크롬이나 엣지에서 이 파일을 열고 마이크를 허용해 주세요.')}
+}
+$('go').onclick=()=>ctx?(stop(),st('중지했어요.')):start();
+const bf=new Float32Array(1024);
+(function L(){if(an){an.getFloatTimeDomainData(bf);let s=0;for(const v of bf)s+=v*v;$('m').style.width=Math.min(100,Math.sqrt(s/1024)*500)+'%'}requestAnimationFrame(L)})();
+upd();
+if(navigator.mediaDevices)devs().catch(()=>{});else st('이 환경에서는 마이크를 쓸 수 없어요. 크롬이나 엣지로 파일을 직접 열어 주세요.');
+</script></body></html>
